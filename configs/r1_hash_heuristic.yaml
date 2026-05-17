@@ -1,0 +1,70 @@
+# r1 — Pipeline validation
+#
+# What it tests: does the scaffold produce trustworthy artifacts?
+# - Hash embedder (no external dependencies, deterministic)
+# - Keyword heuristic base policy (no LLM, no cost)
+# - Gold + random memory (contrastive returns: ~15% high, ~75% near-zero)
+#
+# Expected result: Q-values should spread (mean ~0.15–0.20, std ~0.30)
+# because the hash embedder can distinguish some state-action pairs.
+# Memory will rarely override the heuristic. Success rate = 0 (heuristic
+# can't complete ScienceWorld tasks). H0 and H10 should be "supported";
+# H1–H9 will be "inconclusive" due to zero success — that is correct.
+#
+# Run: python scripts/run_experiment.py --config configs/r1_hash_heuristic.yaml --output-dir results
+
+run_id: r1_hash_heuristic
+
+benchmark:
+  name: scienceworld
+  task_names:
+    - find-non-living-thing       # easiest task: 5-step gold, score deltas at 4 of 5 steps
+  train_variations: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  test_variations: [225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239]
+  max_steps: 20                   # plenty for a 5-step gold path
+  reward_mode: score_delta
+  success_threshold: 0.9
+
+memory_builder:
+  agent: scienceworld_gold_and_random
+  random_episodes_per_task: 3
+  heuristic_prob: 0.2
+
+memory:
+  embedder: hash
+  vocab_size: 4096
+  dim: 64
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 1.0
+  rho_uncertainty: 0.5
+  epsilon: 0.1            # 10% random exploration so trajectories diverge across variants
+  # llm.enabled: false (default) — pure heuristic base policy
+
+variants:
+  - raw_history
+  - summary_memory
+  - semantic_retrieval
+  - state_only_value_memory
+  - raw_prefix_sq_mem
+  - sq_mem
+  - sq_mem_no_returns
+  - sq_mem_no_action_conditioning
+  - sq_mem_no_structured_state
+  - sq_mem_no_uncertainty
+  - sq_mem_top1
+  - sq_mem_uniform_weights
+  - sq_mem_random_memory
+  - sq_mem_shuffled_returns
+  - sq_mem_value_reversed
+  - sq_mem_zero_returns
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5
