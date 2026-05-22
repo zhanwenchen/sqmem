@@ -193,13 +193,81 @@ stratify.
   per task) mixed with random-exploration trajectories (3 per task). A noisier
   or fully self-generated memory bank would test self-correction properties
   not exercised here.
+- **Single benchmark family.** All three runs are on ScienceWorld. ALFWorld
+  (Shridhar et al., 2021) — a household-task text-game benchmark with
+  per-instance object IDs (`shelf 1`, `shelf 5`, …) and an LLM-targeted action
+  space — surfaces a generalization question the ScienceWorld results do not
+  exercise: the cosine action-similarity used by Section 2's estimator
+  collapses to noise when surface tokens differ across instances of the same
+  semantic action. Section 11 addresses this.
 
-## 11. Reproducibility
+## 11. Cross-benchmark generalization (in progress)
+
+Porting SQ-Mem to ALFWorld exposes a benchmark-agnostic question: when memory
+actions and current-state actions differ only in instance-specific tokens
+(`examine shelf 1` vs `examine shelf 5`), the action-conditioning term
+$\text{sim}(u, u_i)$ in Section 2 reads them as unrelated. Empirically, this
+causes `sq_mem` to degenerate toward `sq_mem_no_action_conditioning` on
+ALFWorld even when the thesis (claim 4: $Q(s,a) > V(s)$) should predict a
+gap. We introduce three independent flags — each a paper-faithful design
+choice — that probe different parts of the soft-Q claim:
+
+**A. `normalize_actions`.** Strips standalone digits and articles from
+`action_text` before embedding, generically (no benchmark-specific knowledge).
+Both $h(a)$ and the memory-side $u_i$ are recomputed from the normalized form,
+so `examine shelf 1` and `examine the shelf 5` map to the same retrieval
+neighborhood. Section 2's estimator equation, weights, and aggregation
+are unchanged; only the action key generalizes. This flag is the minimal
+fix to test claim 4 on instance-heavy benchmarks: without it, action
+conditioning measures tokenizer collisions, not semantics.
+
+**B. `state_value_in_prompt`.** Computes a state-only soft-aggregated
+$V(s) = \sum_i w_i(z_t) G_i$ (no action conditioning) and injects it as a
+single scalar line in the LLM prompt. Per-action Q-rerank still happens.
+This flag adds a second probe of claim 4: contrasting B-only against full
+B+Q-rerank measures whether the LLM derives signal from $Q(s,a)$ over and
+above $V(s)$, on top of the linear-combine measurement. Section 6's "not
+RAG" distinction is preserved in spirit — returns are still aggregated
+numerically into a scalar estimator output before any language consumption.
+
+**C. `q_in_prompt`.** Surfaces per-action `[memory Q=…, σ=…]` annotations
+inside the LLM's candidate list and skips the Section 3 arithmetic combine.
+$\hat{Q}$ and $\hat{\sigma}$ are still computed exactly as Section 2
+specifies; only the consumer changes. This is the cleanest test of the
+thesis itself: the paper claims memory is "evidence about which continuations
+led to better outcomes," and never claims the linear combine is the only
+viable decision rule. If C matches or beats the arithmetic combine, the
+*evidence in $\hat{Q}$* — not the specific functional form of Section 3 —
+is doing the work, which is a stronger reading of the thesis. The σ signal
+becomes more informative under C than under the arithmetic combine, because
+a single scalar ρ cannot express the LLM's ability to defer differentially
+when σ is high.
+
+These three flags compose. On ScienceWorld, A should be a no-op (actions
+are mostly distinct verbs, no normalization gain) — flat or improved results
+there are the sanity check that A is not over-aggressive. The full ablation
+matrix on ALFWorld is the 2×2 below, with `normalize_actions=true` held
+on across all four cells:
+
+|                                 | `q_in_prompt: false`                  | `q_in_prompt: true`              |
+| ------------------------------- | ------------------------------------- | -------------------------------- |
+| `state_value_in_prompt: false`  | paper Section 3 (linear combine)      | **C** (LLM consumes Q/σ)         |
+| `state_value_in_prompt: true`   | **B** (V(s) prior + linear combine)   | **B+C** (LLM consumes V + Q/σ)   |
+
+Cells differ only in how the soft-Q estimator output is consumed; the
+estimator itself (Section 2, claim labels 1–3 and the existing variant
+ablations `shuffled_returns`, `value_reversed`, `no_action_conditioning`,
+`semantic_retrieval`) is identical in all four. This separates "is the
+soft-Q estimator informative?" from "is the Section 3 decision rule the
+right consumer?" — two claims the original ScienceWorld experiments
+conflated.
+
+## 12. Reproducibility
 
 Each run's full artifacts are checked into `results/<run_id>/`:
 
 ```
-results/r1_hash_heuristic/
+results/r1_scienceworld_hash_heuristic/
 ├── config_resolved.yaml
 ├── memory_bank.jsonl
 ├── memory_summary.json
@@ -219,14 +287,14 @@ To reproduce:
 ```bash
 pip install -e ".[dev,scienceworld,sentence_transformers,local_llm]"
 # R1: ~12 min on M2 Max, no GPU/LLM required
-python scripts/run_experiment.py --config configs/r1_hash_heuristic.yaml --output-dir results
+python scripts/run_experiment.py --config configs/r1_scienceworld_hash_heuristic.yaml --output-dir results
 # R2: ~35 min on M2 Max (Metal-accelerated batched embeddings)
-python scripts/run_experiment.py --config configs/r2_st_heuristic.yaml --output-dir results
+python scripts/run_experiment.py --config configs/r2_scienceworld_st_heuristic.yaml --output-dir results
 # R3: ~2.5 hr; requires llama.cpp serving Qwen3.5-4B-Q4_K_M on :8080
-python scripts/run_experiment.py --config configs/r3_st_llm.yaml --output-dir results
+python scripts/run_experiment.py --config configs/r3_scienceworld_st_llm.yaml --output-dir results
 # cross-run aggregation
 python scripts/aggregate_results.py \
-  results/r1_hash_heuristic results/r2_st_heuristic results/r3_st_llm \
+  results/r1_scienceworld_hash_heuristic results/r2_scienceworld_st_heuristic results/r3_scienceworld_st_llm \
   --out results/cross_run_summary.csv \
   --hypotheses-out results/cross_run_hypotheses.csv
 ```

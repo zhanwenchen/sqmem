@@ -1,0 +1,66 @@
+# r0 — ALFWorld 10-minute diagnostic
+#
+# Two questions:
+#   1. Does the train_eval="eval" fix prevent the handcoded-expert crash?
+#   2. Can the 4B local LLM hit score>0 on ALFWorld at all? If every rollout
+#      ends at score=0, the soft-Q memory bank has no return variance and
+#      no downstream comparison is meaningful — we need stronger reward
+#      shaping (or a stronger model) before running the full r3 config.
+#
+# Only baselines + one full sq_mem variant — we don't need ablations yet.
+
+run_id: r0_alfworld_diagnostic
+
+benchmark:
+  name: alfworld
+  data_root: ${ALFWORLD_DATA}
+  train_split: train
+  test_split: valid_unseen
+  n_train: 3
+  n_test: 3
+  # 50 instead of 30 — 4B planning is slow; gold paths for these task types
+  # are 5–10 steps but the agent needs slack to recover from wrong turns.
+  max_steps: 50
+  reward_mode: score_delta
+  success_threshold: 0.9
+  # Restrict to ALFWorld's two easiest task types (gold paths ~5–7 steps).
+  # If the 4B can't hit score>0 on these, it can't on harder types either.
+  task_types:
+    - look_at_obj_in_light
+    - pick_and_place_simple
+
+memory_builder:
+  agent: self_rollout
+  n_rollouts_per_task: 5
+  epsilon: 0.3
+
+memory:
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 3.0
+  rho_uncertainty: 0.5
+  epsilon: 0.1
+  memory_mode: q_rerank
+  normalize_actions: true
+  llm:
+    enabled: true
+    provider: local
+    url: http://localhost:8080/v1
+    model: local-model
+    max_candidates: 20
+
+variants:
+  - raw_history
+  - sq_mem
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5

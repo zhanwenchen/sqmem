@@ -23,11 +23,20 @@ import re
 from typing import Any
 
 _SYSTEM_TEXT = (
-    "You are an agent in a text-based science simulation. "
-    "Your only job is to pick the single best next action. "
-    "Reply with ONLY a single integer — the 1-indexed number "
-    "of your chosen action. No explanation. No reasoning. "
-    "Just the integer."
+    "You are an agent in a text-based simulation game. "
+    "Your only job is to pick the single best next action toward "
+    "completing the task described.\n\n"
+    "Important strategies:\n"
+    "- Read the task description carefully. Identify the SPECIFIC objects "
+    "named in the task (e.g. 'pencil' is not 'pen', 'mug' is not 'cup').\n"
+    "- Avoid repeating an action you just took unless the world state has "
+    "materially changed since then. If examining a receptacle revealed no "
+    "useful objects, MOVE to a different receptacle rather than examining "
+    "it again.\n"
+    "- If you've taken the same kind of action 2-3 times with no reward, "
+    "try a different category of action (move/take/open/close/etc.).\n\n"
+    "Reply with ONLY a single integer — the 1-indexed number of your "
+    "chosen action from the numbered list. No explanation. Just the integer."
 )
 
 
@@ -36,13 +45,82 @@ def _build_user_content(
     observation: str,
     recent_actions: list[str],
     candidates: list[str],
+    memory_context: list[dict[str, Any]] | None = None,
+    per_action_q: dict[str, tuple[float, float]] | None = None,
+    state_value_prior: float | None = None,
 ) -> str:
-    history = " → ".join(recent_actions[-5:]) if recent_actions else "none"
-    numbered = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(candidates))
+    recent_for_avoid = recent_actions[-5:]
+    if recent_for_avoid:
+        history_block = (
+            f"Recent actions you just took (DO NOT repeat any of these "
+            f"unless the situation has materially changed):\n"
+            + "\n".join(f"  - {a}" for a in recent_for_avoid)
+        )
+    else:
+        history_block = "Recent actions: none yet — this is the start of the task."
+
+    # Memory-as-context section (RAG mode). Each example surfaces an action
+    # taken in a similar past state and the outcome-score that followed.
+    # The LLM is expected to *abstract* over instance-specific tokens (e.g.
+    # "shelf 1" → "shelf") when applying these patterns to the current state.
+    memory_block = ""
+    if memory_context:
+        lines: list[str] = []
+        for ex in memory_context:
+            act = ex.get("action_text", "")
+            ret = ex.get("return_value", None)
+            if ret is None:
+                lines.append(f"  - {act!r}")
+            else:
+                lines.append(f"  - {act!r} → outcome score {float(ret):.2f}")
+        memory_block = (
+            "Examples from similar past situations (these are PATTERNS, not "
+            "literal actions — adapt the action shape to your current state):\n"
+            + "\n".join(lines)
+            + "\n\n"
+        )
+
+    # State-value prior (variant B): soft-aggregated return over states like
+    # this one. A single scalar hint — informs the LLM whether the current
+    # state has historically been close to a good outcome.
+    prior_block = ""
+    if state_value_prior is not None:
+        prior_block = (
+            f"Memory prior: similar past states reached an average final "
+            f"outcome score of {float(state_value_prior):.2f}.\n\n"
+        )
+
+    # Per-action memory Q annotations (variant C): each candidate gets its
+    # soft-Q estimate and uncertainty. The LLM weighs them itself — no
+    # arithmetic combine. Higher σ means less reliable.
+    if per_action_q is not None:
+        numbered_lines: list[str] = []
+        for i, a in enumerate(candidates):
+            anno = per_action_q.get(a)
+            if anno is None:
+                numbered_lines.append(f"{i + 1}. {a}")
+            else:
+                q, sigma = anno
+                numbered_lines.append(
+                    f"{i + 1}. {a}    [memory Q={q:.2f}, σ={sigma:.2f}]"
+                )
+        numbered = "\n".join(numbered_lines)
+        q_note = (
+            "Each action's [memory Q, σ] reflects soft-aggregated returns from "
+            "similar past situations. Higher Q is better; higher σ means less "
+            "confident. Use these as evidence, not as commands.\n\n"
+        )
+    else:
+        numbered = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(candidates))
+        q_note = ""
+
     return (
         f"Task: {task_goal}\n\n"
-        f"Recent actions: {history}\n\n"
+        f"{history_block}\n\n"
+        f"{memory_block}"
+        f"{prior_block}"
         f"Current observation:\n{observation[:800]}\n\n"
+        f"{q_note}"
         f"Valid actions:\n{numbered}\n\n"
         "Reply with the number of the single best next action."
     )
@@ -71,10 +149,12 @@ class LLMBasePolicy:
         provider: str = "anthropic",
         url: str = "http://localhost:11434/v1",
         max_tokens: int | None = None,  # None → 8 for anthropic, 64 for local
+        repetition_window: int = 3,
     ) -> None:
         self.model = model
         self.max_candidates = max_candidates
         self.provider = provider
+        self.repetition_window = max(0, int(repetition_window))
         self._client: Any = None
 
         self._max_tokens = max_tokens if max_tokens is not None else (8 if provider == "anthropic" else 64)
@@ -112,12 +192,20 @@ class LLMBasePolicy:
         valid_actions: list[str],
         task_goal: str,
         recent_actions: list[str],
+        memory_context: list[dict[str, Any]] | None = None,
+        per_action_q: dict[str, tuple[float, float]] | None = None,
+        state_value_prior: float | None = None,
     ) -> dict[str, float]:
         """Return a score in [0, 1] for each valid action.
 
         The selected action gets 1.0. Other pre-filtered candidates get a
         small graded score so memory Q-values can still override when the
         evidence is strong. Actions outside the pre-filtered set get 0.0.
+
+        When `memory_context` is provided (RAG-context mode), each example
+        is rendered into the prompt as an "in similar past situations…"
+        section so the LLM can reason over it. The LLM remains the decider;
+        no Q-value reranking happens downstream in RAG mode.
         """
         from sq_mem_experiments.agents.scienceworld_agents import heuristic_base_score as _base_score  # local import avoids circular dep
 
@@ -126,8 +214,27 @@ class LLMBasePolicy:
             key=lambda a: _base_score(a, task_goal, observation),
             reverse=True,
         )
+        # Demote actions taken in the last `repetition_window` steps — this
+        # breaks the small-LLM "examine shelf 1 × 7" trap without any
+        # benchmark-specific code. We don't *delete* the repeated actions
+        # (the agent might genuinely need to repeat one); we just push them
+        # to the end of the candidate list so the LLM rarely picks them, and
+        # SQ-Mem's Q-value can still rerank them in if memory says they help.
+        if self.repetition_window > 0 and recent_actions:
+            recent_set = set(recent_actions[-self.repetition_window:])
+            non_repeated = [a for a in ranked if a not in recent_set]
+            repeated = [a for a in ranked if a in recent_set]
+            ranked = non_repeated + repeated
         candidates = ranked[: self.max_candidates]
-        user_content = _build_user_content(task_goal, observation, recent_actions, candidates)
+        user_content = _build_user_content(
+            task_goal,
+            observation,
+            recent_actions,
+            candidates,
+            memory_context,
+            per_action_q=per_action_q,
+            state_value_prior=state_value_prior,
+        )
 
         selected_idx = 0
         try:

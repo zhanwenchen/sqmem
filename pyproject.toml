@@ -22,6 +22,9 @@ dev = [
 scienceworld = [
     "scienceworld>=1.1",
 ]
+alfworld = [
+    "alfworld>=0.3",
+]
 local_llm = [
     "openai>=1.0",
 ]
@@ -35,3 +38,6 @@ include = ["sq_mem_experiments*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "parallel: integration tests for episode-level multiprocessing (live JVM required; skipped by default)",
+]

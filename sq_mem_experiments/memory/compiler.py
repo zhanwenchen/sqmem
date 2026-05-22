@@ -16,6 +16,33 @@ def compile_observation_only(observations: list[str]) -> str:
     return observations[-1] if observations else ""
 
 
+def compile_alfworld(
+    observations: list[str],
+    actions: list[str],
+    task_goal: str = "",
+    score: float = 0.0,
+) -> str:
+    """ALFWorld-specific structured prefix state.
+
+    Same shape as compile_scienceworld but tuned for ALFWorld observations,
+    which typically encode the current room and visible receptacles.
+    """
+    lines: list[str] = []
+    if task_goal:
+        lines.append(f"Task: {task_goal}")
+    lines.append(f"Score: {score:.2f}")
+    lines.append(f"Steps: {len(actions)}")
+    if observations:
+        # ALFWorld observations describe the room + receptacle state;
+        # keep up to ~600 chars to capture furniture and contents.
+        lines.append(f"Observation: {observations[-1][:600]}")
+    if actions:
+        lines.append(f"Last action: {actions[-1]}")
+    if len(actions) >= 3:
+        lines.append(f"Recent actions: {' | '.join(actions[-3:])}")
+    return "\n".join(lines)
+
+
 def compile_summary(
     observations: list[str],
     actions: list[str],

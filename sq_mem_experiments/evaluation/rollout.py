@@ -6,7 +6,17 @@ from sq_mem_experiments.envs.base import BaseEnv
 from sq_mem_experiments.schema import CandidateAction, Decision, Episode, TaskSpec
 
 if TYPE_CHECKING:
-    from sq_mem_experiments.envs.scienceworld_adapter import ScienceWorldAdapter
+    from typing import Protocol
+
+    class _GoldEnv(Protocol):
+        gold_sequence: list[str]
+        task_goal: str
+
+        def reset(self, task_spec: "TaskSpec") -> str: ...
+        def step(self, action: str) -> tuple[str, float, bool, dict[str, Any]]: ...
+        def get_valid_actions(self) -> list[str]: ...
+        def next_gold_action(self) -> str | None: ...
+        def close(self) -> None: ...
 
 
 def rollout_episode(
@@ -76,27 +86,32 @@ def rollout_episode(
 
 
 def rollout_gold_episode(
-    env: "ScienceWorldAdapter",
+    env: "_GoldEnv",
     task_spec: TaskSpec,
     success_threshold: float = 0.9,
 ) -> Episode:
     """Follow the gold action sequence and record decisions with return-to-go.
 
-    The env must have been constructed with generate_gold_path=True.
+    The env must have been constructed with generate_gold_path=True (or
+    otherwise expose a populated `gold_sequence` after reset).
     If a gold action is not in the valid-action set it is executed anyway
-    (ScienceWorld accepts free-text); the score just won't advance.
+    (many text envs accept free-text); the score just won't advance.
     """
     obs = env.reset(task_spec)
-    gold = env.gold_sequence
 
     decisions: list[Decision] = []
     total_reward = 0.0
     done = False
     info: dict[str, Any] = {}
+    # Safety cap on gold rollouts — well above any expected gold path length;
+    # protects against envs whose next_gold_action() never returns None.
+    max_gold_steps = 200
 
-    for step_idx, action in enumerate(gold):
+    for step_idx in range(max_gold_steps):
+        action = env.next_gold_action()
+        if action is None:
+            break
         state_text = obs[:500]
-        valid = env.get_valid_actions()
         candidate = CandidateAction(action_text=action, action_name=action)
 
         d = Decision(

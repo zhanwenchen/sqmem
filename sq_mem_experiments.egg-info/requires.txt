@@ -4,9 +4,18 @@ pandas>=2.0
 pyyaml>=6.0
 tqdm>=4.65
 
+[alfworld]
+alfworld>=0.3
+
 [dev]
 pytest>=7.4
 pytest-cov>=4.1
 
+[local_llm]
+openai>=1.0
+
 [scienceworld]
 scienceworld>=1.1
+
+[sentence_transformers]
+sentence-transformers>=2.2

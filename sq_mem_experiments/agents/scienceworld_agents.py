@@ -35,6 +35,25 @@ class AgentConfig:
     alpha: float = 0.5
     beta: float = 0.1
     epsilon: float = 0.0                  # ε-greedy exploration probability at test time
+    # memory_mode: "q_rerank" → soft Q table (original SQ-Mem behaviour);
+    # "rag_context" → surface retrieved (state, action, return) triples in the
+    # LLM prompt and let the LLM decide. Action shapes generalize across
+    # instance-specific naming (e.g. ALFWorld's "shelf 1" vs "shelf 5").
+    memory_mode: str = "q_rerank"
+    # How many top-K memories to surface in the LLM prompt under rag_context.
+    rag_top_k: int = 5
+
+    # Paper-faithful middle-ground flags (all compose with q_rerank mode).
+    # A) normalize_actions: strip instance tokens (digits, articles) before
+    #    embedding so "examine shelf 1" matches "examine shelf 5" in retrieval.
+    #    Soft-Q mechanism intact; only the action key generalizes.
+    normalize_actions: bool = False
+    # B) state_value_in_prompt: compute V(s) via state-only soft aggregation
+    #    over retrieved returns and inject it as a scalar prior in the prompt.
+    state_value_in_prompt: bool = False
+    # C) q_in_prompt: include per-action mem_Q and σ in the LLM prompt and
+    #    let the LLM decide; arithmetic combine (score + λ·Q − ρ·σ) is skipped.
+    q_in_prompt: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -78,10 +97,16 @@ def heuristic_base_score(action: str, task_goal: str, observation: str) -> float
 class ScienceWorldBaseAgent(BaseAgent):
     """Heuristic base policy with no external memory."""
 
-    def __init__(self, llm_policy: LLMBasePolicy | None = None, epsilon: float = 0.0) -> None:
+    def __init__(
+        self,
+        llm_policy: LLMBasePolicy | None = None,
+        epsilon: float = 0.0,
+        seed: int | None = None,
+    ) -> None:
         super().__init__("raw_history")
         self._llm_policy = llm_policy
         self._epsilon = epsilon
+        self._seed = seed
         self._rng = random.Random()
         self._task_id = ""
         self._task_goal = ""
@@ -97,8 +122,13 @@ class ScienceWorldBaseAgent(BaseAgent):
         self._actions = []
         self._decisions = []
         self._step = 0
-        # Seed per task so exploration is comparable across variants on the same task
-        self._rng = random.Random(hash((task_id, self.variant, "explore")) & 0xFFFFFFFF)
+        # Seed scheme: per-task by default (so exploration is comparable across
+        # variants on the same test task), plus an optional `seed` salt the
+        # memory-builder uses to get distinct rollouts of the same training task.
+        salt: tuple[Any, ...] = (task_id, self.variant, "explore")
+        if self._seed is not None:
+            salt = salt + (self._seed,)
+        self._rng = random.Random(hash(salt) & 0xFFFFFFFF)
 
     def act(self, observation: str, valid_actions: list[str]) -> str:
         self._last_obs = observation
@@ -152,10 +182,16 @@ class ScienceWorldBaseAgent(BaseAgent):
 class ScienceWorldSummaryMemAgent(BaseAgent):
     """Uses a compressed summary of the current trajectory as context."""
 
-    def __init__(self, llm_policy: LLMBasePolicy | None = None, epsilon: float = 0.0) -> None:
+    def __init__(
+        self,
+        llm_policy: LLMBasePolicy | None = None,
+        epsilon: float = 0.0,
+        seed: int | None = None,
+    ) -> None:
         super().__init__("summary_memory")
         self._llm_policy = llm_policy
         self._epsilon = epsilon
+        self._seed = seed
         self._rng = random.Random()
         self._task_goal = ""
         self._task_id = ""
@@ -171,7 +207,10 @@ class ScienceWorldSummaryMemAgent(BaseAgent):
         self._actions = []
         self._decisions = []
         self._step = 0
-        self._rng = random.Random(hash((task_id, self.variant, "explore")) & 0xFFFFFFFF)
+        salt: tuple[Any, ...] = (task_id, self.variant, "explore")
+        if self._seed is not None:
+            salt = salt + (self._seed,)
+        self._rng = random.Random(hash(salt) & 0xFFFFFFFF)
 
     def act(self, observation: str, valid_actions: list[str]) -> str:
         self._observations.append(observation)
@@ -331,6 +370,7 @@ class ScienceWorldSQMemAgent(BaseAgent):
             beta=config.beta,
             action_conditioning=config.action_conditioning,
             weight_mode=config.weight_mode,
+            normalize_actions=config.normalize_actions,
         )
         self._task_goal = ""
         self._task_id = ""
@@ -360,27 +400,49 @@ class ScienceWorldSQMemAgent(BaseAgent):
             return compile_observation_only(self._observations)
         return compile_raw(self._observations, self._actions)
 
+    def _build_rag_memory_context(self, state_text: str) -> list[dict[str, Any]]:
+        """RAG mode: retrieve top-K memories by state similarity and format as
+        prompt examples, applying the same variant-specific transformations
+        the Q-rerank path uses.
+
+        - `use_returns=False` (semantic_retrieval): hide return values
+        - `weight_mode="top1"`: surface only the single top match
+        - other variants: returns inherit the bank-level transform that the
+          runner already applies via apply_return_transform (zero/shuffle/
+          reverse/random_memory), so we just pass them through.
+        """
+        top_k = self._config.rag_top_k
+        if self._config.weight_mode == "top1":
+            top_k = 1
+        retrievals = self._sqm.retrieve_by_state(state_text, top_k=top_k)
+        out: list[dict[str, Any]] = []
+        for r in retrievals:
+            entry: dict[str, Any] = {"action_text": r.item.action_text}
+            if self._config.use_returns:
+                entry["return_value"] = float(r.item.return_value)
+            out.append(entry)
+        return out
+
     def act(self, observation: str, valid_actions: list[str]) -> str:  # noqa: C901
         self._observations.append(observation)
         if not valid_actions:
             return "look around"
 
         state_text = self._compile_state()
-        if self._llm_policy:
-            base_scores = self._llm_policy.score_actions(
-                observation, valid_actions, self._task_goal, self._actions
-            )
-        else:
-            base_scores = {a: heuristic_base_score(a, self._task_goal, observation) for a in valid_actions}
-        base_selected = max(base_scores, key=lambda a: base_scores[a])
 
-        combined: dict[str, float] = {}
+        # ──────────────── RAG-context mode ────────────────
+        # Memory is surfaced as in-context examples for the LLM, not used to
+        # rerank candidate actions via a Q-value. The LLM is the decider.
+        if self._config.memory_mode == "rag_context" and self._llm_policy:
+            return self._act_rag_context(state_text, observation, valid_actions)
+
+        # ──────────────── Q-rerank mode (original SQ-Mem) ────────────────
+        # Batch-embed state once + all candidate actions once (huge speedup on ST embedder)
+        batch_results = self._sqm.estimate_batch(state_text, valid_actions)
+
         mem_qs: dict[str, float] = {}
         mem_sigmas: dict[str, float] = {}
         best_retrievals: dict[str, tuple[list[str], list[str], list[float], list[float]]] = {}
-
-        # Batch-embed state once + all candidate actions once (huge speedup on ST embedder)
-        batch_results = self._sqm.estimate_batch(state_text, valid_actions)
         for action, (q, sigma, retrievals) in zip(valid_actions, batch_results):
             if not self._config.use_returns:
                 # semantic_retrieval: use avg similarity score, ignore returns
@@ -390,20 +452,54 @@ class ScienceWorldSQMemAgent(BaseAgent):
             else:
                 effective_q = q
                 effective_sigma = sigma if self._config.uncertainty_penalty else 0.0
-
             mem_qs[action] = effective_q
             mem_sigmas[action] = effective_sigma
-            combined[action] = (
-                base_scores[action]
-                + self._config.lambda_memory * effective_q
-                - self._config.rho_uncertainty * effective_sigma
-            )
             best_retrievals[action] = (
                 [r.item.item_id for r in retrievals],
                 [r.item.action_text for r in retrievals],
                 [r.item.return_value for r in retrievals],
                 [r.weight for r in retrievals],
             )
+
+        # State-value prior V(s): soft-aggregated returns over state-only
+        # retrieval — a single scalar hint for the LLM (variant B).
+        v_prior: float | None = None
+        if self._config.state_value_in_prompt:
+            state_retrievals = self._sqm.retrieve_by_state(
+                state_text, top_k=self._config.top_r
+            )
+            if state_retrievals:
+                v_prior = float(
+                    sum(r.item.return_value * r.weight for r in state_retrievals)
+                )
+
+        # Per-action Q/σ surfaced in the prompt (variant C). When True, the
+        # LLM is the decider; arithmetic combine is skipped.
+        per_action_q: dict[str, tuple[float, float]] | None = None
+        if self._config.q_in_prompt:
+            per_action_q = {a: (mem_qs[a], mem_sigmas[a]) for a in valid_actions}
+
+        if self._llm_policy:
+            base_scores = self._llm_policy.score_actions(
+                observation, valid_actions, self._task_goal, self._actions,
+                per_action_q=per_action_q,
+                state_value_prior=v_prior,
+            )
+        else:
+            base_scores = {a: heuristic_base_score(a, self._task_goal, observation) for a in valid_actions}
+        base_selected = max(base_scores, key=lambda a: base_scores[a])
+
+        combined: dict[str, float] = {}
+        if self._config.q_in_prompt:
+            # LLM saw Q/σ in its prompt — its score IS the combined score.
+            combined = dict(base_scores)
+        else:
+            for action in valid_actions:
+                combined[action] = (
+                    base_scores[action]
+                    + self._config.lambda_memory * mem_qs[action]
+                    - self._config.rho_uncertainty * mem_sigmas[action]
+                )
 
         argmax_selected = max(combined, key=lambda a: combined[a])
         if self._config.epsilon > 0 and self._rng.random() < self._config.epsilon:
@@ -442,6 +538,97 @@ class ScienceWorldSQMemAgent(BaseAgent):
             retrieved_actions=acts,
             retrieved_returns=rets,
             retrieval_weights=wts,
+        )
+        self._decisions.append(d)
+        self._actions.append(selected)
+        self._step += 1
+        return selected
+
+    def _act_rag_context(
+        self,
+        state_text: str,
+        observation: str,
+        valid_actions: list[str],
+    ) -> str:
+        """Decision in RAG-context mode.
+
+        The LLM is given (a) the candidate actions and (b) retrieved memory as
+        prompt examples. The LLM picks the action. No Q-rerank.
+
+        We compute a base-only score (LLM call WITHOUT memory context) so the
+        decision log's `memory_changed_decision` flag captures whether the
+        memory examples actually changed the LLM's choice. Analogue of the
+        Q-rerank path's argmax(base) vs argmax(combined).
+        """
+        assert self._llm_policy is not None
+
+        v_prior: float | None = None
+        if self._config.state_value_in_prompt:
+            state_retrievals = self._sqm.retrieve_by_state(
+                state_text, top_k=self._config.top_r
+            )
+            if state_retrievals:
+                v_prior = float(
+                    sum(r.item.return_value * r.weight for r in state_retrievals)
+                )
+
+        # Reference choice: LLM without memory context
+        base_scores = self._llm_policy.score_actions(
+            observation, valid_actions, self._task_goal, self._actions,
+            memory_context=None,
+            state_value_prior=v_prior,
+        )
+        base_selected = max(base_scores, key=lambda a: base_scores[a])
+
+        # Memory-informed choice: LLM with retrieved examples in the prompt
+        memory_context = self._build_rag_memory_context(state_text)
+        ctx_scores = self._llm_policy.score_actions(
+            observation, valid_actions, self._task_goal, self._actions,
+            memory_context=memory_context,
+            state_value_prior=v_prior,
+        )
+        argmax_selected = max(ctx_scores, key=lambda a: ctx_scores[a])
+
+        if self._config.epsilon > 0 and self._rng.random() < self._config.epsilon:
+            selected = self._rng.choice(valid_actions)
+        else:
+            selected = argmax_selected
+        memory_changed = argmax_selected != base_selected
+
+        ret_actions = [c.get("action_text", "") for c in memory_context]
+        ret_returns = [float(c.get("return_value", 0.0)) for c in memory_context]
+        mem_q = float(sum(ret_returns) / len(ret_returns)) if ret_returns else 0.0
+        mem_sigma = (
+            float((sum((r - mem_q) ** 2 for r in ret_returns) / len(ret_returns)) ** 0.5)
+            if ret_returns else 0.0
+        )
+
+        candidates = [
+            CandidateAction(
+                action_text=a,
+                action_name=a,
+                base_score=base_scores[a],
+                combined_score=ctx_scores[a],
+                memory_q=mem_q,
+                memory_sigma=mem_sigma,
+            )
+            for a in valid_actions
+        ]
+        d = Decision(
+            task_id=self._task_id,
+            step_index=self._step,
+            state_text=state_text,
+            observation=observation,
+            candidates=candidates,
+            base_selected_action=base_selected,
+            selected_action=selected,
+            memory_changed_decision=memory_changed,
+            memory_q=mem_q,
+            memory_sigma=mem_sigma,
+            retrieved_memory_ids=[],
+            retrieved_actions=ret_actions,
+            retrieved_returns=ret_returns,
+            retrieval_weights=[1.0 / len(ret_returns)] * len(ret_returns) if ret_returns else [],
         )
         self._decisions.append(d)
         self._actions.append(selected)

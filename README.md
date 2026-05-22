@@ -176,6 +176,8 @@ See [docs/claim_ledger.md](docs/claim_ledger.md) for the full ledger.
 
 ```bash
 hf download unsloth/Qwen3.5-4B-GGUF --local-dir qwen3.5_4b Qwen3.5-4B-Q4_K_M.gguf
+HF_HUB_ENABLE_HF_TRANSFER=1 hf download unsloth/Qwen3.5-9B-GGUF --local-dir qwen3.5_9b Qwen3.5-9B-UD-Q4_K_XL.gguf
+
 ```
 
 ```bash
@@ -240,6 +242,7 @@ How are you?<|im_end|>
 
 ```bash
 uv pip install openai sentence-transformers
+uv pip install alfworld
 ```
 
 
@@ -247,6 +250,14 @@ First make sure the service is running:
 
 ```bash
 /Users/zhanwenchen/llama.cpp/build/bin/llama-server -m /Users/zhanwenchen/sqmem/qwen3.5_4b/Qwen3.5-4B-Q4_K_M.gguf --port 8080 --ctx-size 2048 --api-key local
+/Users/zhanwenchen/llama.cpp/build/bin/llama-server \
+  -m /Users/zhanwenchen/sqmem/qwen3.5_9b/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+  --port 8080 \
+  --ctx-size 8192 \
+  -ngl 999 \
+  --api-key local \
+  --chat-template-kwargs '{"enable_thinking":false}'
+
 ```
 
 Then run the code:
@@ -254,4 +265,16 @@ Then run the code:
 ```bash
 rm -rf results/scienceworld_smoke
 python scripts/run_experiment.py --config configs/scienceworld_smoke.yaml --output-dir results
+uv pip install -e ".[dev,scienceworld,alfworld,sentence_transformers,local_llm]"
+export ALFWORLD_DATA=${HOME}/.cache/alfworld
+export ALFWORLD_CONFIG=/Users/zhanwenchen/sqmem/config_alfworld.yaml
+```
+
+To run the experiment
+
+```bash
+kill $(cat logs/overnight.pid)
+nohup ./scripts/run_overnight.sh > logs/overnight.log 2>&1 &
+echo $! > logs/overnight.pid
+disown
 ```

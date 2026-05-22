@@ -1,4 +1,5 @@
 """Soft-Q Memory estimator: nonparametric value estimate from retrieved memories."""
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,6 +8,25 @@ from sq_mem_experiments.memory.embeddings import Embedder, HashEmbedder
 from sq_mem_experiments.schema import MemoryItem
 
 WEIGHT_MODES = {"softmax", "uniform", "top1"}
+
+_NORM_DIGIT_RE = re.compile(r"\b\d+\b")
+_NORM_ARTICLE_RE = re.compile(r"\b(?:the|a|an)\b")
+_NORM_WS_RE = re.compile(r"\s+")
+
+
+def normalize_action_text(text: str) -> str:
+    """Strip instance-specific tokens for cross-instance retrieval matching.
+
+    Lowercases, removes standalone digits and articles, collapses whitespace.
+    "examine shelf 1" and "examine the shelf 5" both become "examine shelf".
+
+    Generic and benchmark-agnostic — no domain knowledge of object names.
+    """
+    s = text.lower()
+    s = _NORM_DIGIT_RE.sub("", s)
+    s = _NORM_ARTICLE_RE.sub("", s)
+    s = _NORM_WS_RE.sub(" ", s).strip()
+    return s
 
 
 @dataclass
@@ -33,6 +53,7 @@ class SoftQMemory:
         beta: float = 0.1,
         action_conditioning: bool = True,
         weight_mode: str = "softmax",
+        normalize_actions: bool = False,
     ):
         if weight_mode not in WEIGHT_MODES:
             raise ValueError(f"weight_mode must be one of {WEIGHT_MODES}")
@@ -43,15 +64,28 @@ class SoftQMemory:
         self.beta = beta
         self.action_conditioning = action_conditioning
         self.weight_mode = weight_mode
+        self.normalize_actions = normalize_actions
 
         dim = self.embedder.dim
         if items:
             self._state_mat = np.array(
                 [it.state_vec for it in items], dtype=np.float32
             )
-            self._action_mat = np.array(
-                [it.action_vec for it in items], dtype=np.float32
-            )
+            if normalize_actions:
+                norm_texts = [normalize_action_text(it.action_text) for it in items]
+                if hasattr(self.embedder, "embed_batch"):
+                    self._action_mat = np.asarray(
+                        self.embedder.embed_batch(norm_texts),  # type: ignore[attr-defined]
+                        dtype=np.float32,
+                    )
+                else:
+                    self._action_mat = np.stack(
+                        [self.embedder.embed(t) for t in norm_texts]
+                    ).astype(np.float32)
+            else:
+                self._action_mat = np.array(
+                    [it.action_vec for it in items], dtype=np.float32
+                )
             self._returns = np.array(
                 [it.return_value for it in items], dtype=np.float32
             )
@@ -70,7 +104,8 @@ class SoftQMemory:
             return 0.0, 0.0, []
 
         z = self.embedder.embed(state_text)
-        u = self.embedder.embed(action_text)
+        a_text = normalize_action_text(action_text) if self.normalize_actions else action_text
+        u = self.embedder.embed(a_text)
 
         state_sims = self._state_mat @ z
         if self.action_conditioning:
@@ -109,6 +144,34 @@ class SoftQMemory:
         ]
         return q, uncertainty, retrievals
 
+    def retrieve_by_state(
+        self,
+        state_text: str,
+        top_k: int = 5,
+    ) -> list[Retrieval]:
+        """State-only retrieval used by RAG-context memory mode.
+
+        Unlike `estimate()`/`estimate_batch()`, this ignores the action
+        dimension entirely — the LLM consumes retrieved (state, action,
+        return) triples as prompt examples and is free to decide which
+        of its candidate actions match the retrieved patterns.
+        """
+        if len(self.items) == 0 or top_k <= 0:
+            return []
+        z = self.embedder.embed(state_text)
+        state_sims: np.ndarray = self._state_mat @ z
+        k = min(top_k, len(self.items))
+        top_idx = np.argpartition(state_sims, -k)[-k:]
+        top_idx = top_idx[np.argsort(state_sims[top_idx])[::-1]]
+        return [
+            Retrieval(
+                item=self.items[int(i)],
+                score=float(state_sims[int(i)]),
+                weight=1.0 / k,
+            )
+            for i in top_idx
+        ]
+
     def retrieval_similarity(self, state_text: str, action_text: str) -> float:
         """Average top-R retrieval score (used by semantic_retrieval variant)."""
         if len(self.items) == 0:
@@ -137,13 +200,18 @@ class SoftQMemory:
 
         action_sims_all = np.zeros((n, len(self.items)), dtype=np.float32)
         if self.action_conditioning:
+            query_texts = (
+                [normalize_action_text(a) for a in action_texts]
+                if self.normalize_actions
+                else action_texts
+            )
             if hasattr(self.embedder, "embed_batch"):
                 action_mat: np.ndarray = np.asarray(
-                    self.embedder.embed_batch(action_texts),  # type: ignore[attr-defined]
+                    self.embedder.embed_batch(query_texts),  # type: ignore[attr-defined]
                     dtype=np.float32,
                 )
             else:
-                action_mat = np.stack([self.embedder.embed(a) for a in action_texts])
+                action_mat = np.stack([self.embedder.embed(a) for a in query_texts])
             action_sims_all = action_mat @ self._action_mat.T  # (N_actions, N_items)
 
         results: list[tuple[float, float, list[Retrieval]]] = []

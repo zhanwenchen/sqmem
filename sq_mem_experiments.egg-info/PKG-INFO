@@ -12,3 +12,9 @@ Requires-Dist: pytest>=7.4; extra == "dev"
 Requires-Dist: pytest-cov>=4.1; extra == "dev"
 Provides-Extra: scienceworld
 Requires-Dist: scienceworld>=1.1; extra == "scienceworld"
+Provides-Extra: alfworld
+Requires-Dist: alfworld>=0.3; extra == "alfworld"
+Provides-Extra: local-llm
+Requires-Dist: openai>=1.0; extra == "local-llm"
+Provides-Extra: sentence-transformers
+Requires-Dist: sentence-transformers>=2.2; extra == "sentence-transformers"

@@ -1,19 +1,20 @@
-# r1 — Pipeline validation
+# r2 — Retrieval quality (sentence-transformers, heuristic base)
 #
-# What it tests: does the scaffold produce trustworthy artifacts?
-# - Hash embedder (no external dependencies, deterministic)
-# - Keyword heuristic base policy (no LLM, no cost)
-# - Gold + random memory (contrastive returns: ~15% high, ~75% near-zero)
+# What it tests: does semantic retrieval find the right memories?
+# Only change from r1: embedder = sentence_transformers.
+# Everything else identical so any difference is attributable to retrieval.
 #
-# Expected result: Q-values should spread (mean ~0.15–0.20, std ~0.30)
-# because the hash embedder can distinguish some state-action pairs.
-# Memory will rarely override the heuristic. Success rate = 0 (heuristic
-# can't complete ScienceWorld tasks). H0 and H10 should be "supported";
-# H1–H9 will be "inconclusive" due to zero success — that is correct.
+# Expected result: Q-values for specific gold actions ("look around",
+# "pick up metal pot") should rise to 0.5–0.8 because the embedder now
+# matches test states to semantically similar gold-trajectory states.
+# "focus on OBJ" and other template actions should stay near Q=0 (no
+# gold coverage). Memory should start changing decisions vs heuristic.
+# Success rate may still be 0 because the heuristic base policy is weak —
+# but intervention rate and calibration should improve over r1.
 #
-# Run: python scripts/run_experiment.py --config configs/r1_hash_heuristic.yaml --output-dir results
+# Run: python scripts/run_experiment.py --config configs/r2_scienceworld_st_heuristic.yaml --output-dir results
 
-run_id: r1_hash_heuristic
+run_id: r2_scienceworld_st_heuristic
 
 benchmark:
   name: scienceworld
@@ -21,7 +22,7 @@ benchmark:
     - find-non-living-thing       # easiest task: 5-step gold, score deltas at 4 of 5 steps
   train_variations: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
   test_variations: [225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239]
-  max_steps: 20                   # plenty for a 5-step gold path
+  max_steps: 30                   # plenty for a 5-step gold path
   reward_mode: score_delta
   success_threshold: 0.9
 
@@ -31,9 +32,8 @@ memory_builder:
   heuristic_prob: 0.2
 
 memory:
-  embedder: hash
-  vocab_size: 4096
-  dim: 64
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
   top_r: 10
   alpha: 0.5
   beta: 0.1
@@ -42,7 +42,7 @@ agent:
   lambda_memory: 1.0
   rho_uncertainty: 0.5
   epsilon: 0.1            # 10% random exploration so trajectories diverge across variants
-  # llm.enabled: false (default) — pure heuristic base policy
+  # llm.enabled: false (default) — still pure heuristic
 
 variants:
   - raw_history

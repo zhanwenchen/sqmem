@@ -1,0 +1,59 @@
+# r2 — ALFWorld retrieval quality (sentence-transformers, heuristic base policy)
+# Only change from r1_alfworld: embedder = sentence_transformers.
+
+run_id: r2_alfworld_st_heuristic
+
+benchmark:
+  name: alfworld
+  data_root: ${ALFWORLD_DATA}
+  train_split: train
+  test_split: valid_unseen
+  n_train: 15
+  n_test: 15
+  max_steps: 50    # ALFWorld gold paths 10–25 steps; 50 ≈ 2–5× slack
+  reward_mode: score_delta
+  success_threshold: 0.9
+
+memory_builder:
+  # Use self_rollout (see r1 ALFWorld config for the rationale — ALFWorld's
+  # gold-path source has an upstream bug we deliberately bypass).
+  agent: self_rollout
+  n_rollouts_per_task: 3
+  epsilon: 0.3
+
+memory:
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 1.0
+  rho_uncertainty: 0.5
+  epsilon: 0.1
+
+variants:
+  - raw_history
+  - summary_memory
+  - semantic_retrieval
+  - state_only_value_memory
+  - raw_prefix_sq_mem
+  - sq_mem
+  - sq_mem_no_returns
+  - sq_mem_no_action_conditioning
+  - sq_mem_no_structured_state
+  - sq_mem_no_uncertainty
+  - sq_mem_top1
+  - sq_mem_uniform_weights
+  - sq_mem_random_memory
+  - sq_mem_shuffled_returns
+  - sq_mem_value_reversed
+  - sq_mem_zero_returns
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5

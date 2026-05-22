@@ -28,10 +28,12 @@ class ScienceWorldAdapter(BaseEnv):
         self._last_score: float = 0.0
         self._goal: str = ""
         self._gold_sequence: list[str] = []
+        self._gold_cursor: int = 0
 
     def reset(self, task_spec: TaskSpec) -> str:
         self._last_score = 0.0
         self._gold_sequence = []
+        self._gold_cursor = 0
         self._env.load(
             task_spec.task_name,
             task_spec.variation_id,
@@ -42,6 +44,14 @@ class ScienceWorldAdapter(BaseEnv):
         if self._generate_gold_path:
             self._gold_sequence = list(self._env.get_gold_action_sequence())
         return str(obs)
+
+    def next_gold_action(self) -> str | None:
+        """Return the next pre-loaded gold action (or None when exhausted)."""
+        if self._gold_cursor >= len(self._gold_sequence):
+            return None
+        action = self._gold_sequence[self._gold_cursor]
+        self._gold_cursor += 1
+        return action
 
     @property
     def gold_sequence(self) -> list[str]:

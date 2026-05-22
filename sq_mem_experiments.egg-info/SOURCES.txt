@@ -9,9 +9,11 @@ sq_mem_experiments.egg-info/requires.txt
 sq_mem_experiments.egg-info/top_level.txt
 sq_mem_experiments/agents/__init__.py
 sq_mem_experiments/agents/base.py
+sq_mem_experiments/agents/llm_policy.py
 sq_mem_experiments/agents/scienceworld_agents.py
 sq_mem_experiments/envs/__init__.py
 sq_mem_experiments/envs/agentgym_adapter.py
+sq_mem_experiments/envs/alfworld_adapter.py
 sq_mem_experiments/envs/appworld_adapter.py
 sq_mem_experiments/envs/base.py
 sq_mem_experiments/envs/scienceworld_adapter.py
@@ -20,6 +22,7 @@ sq_mem_experiments/evaluation/__init__.py
 sq_mem_experiments/evaluation/hypothesis_testing.py
 sq_mem_experiments/evaluation/memory_builder.py
 sq_mem_experiments/evaluation/metrics.py
+sq_mem_experiments/evaluation/parallel.py
 sq_mem_experiments/evaluation/rollout.py
 sq_mem_experiments/evaluation/runner.py
 sq_mem_experiments/memory/__init__.py
@@ -31,3 +34,4 @@ sq_mem_experiments/utils/__init__.py
 tests/test_core_components.py
 tests/test_hypothesis_testing.py
 tests/test_memory_mechanism.py
+tests/test_parallel_rollouts.py

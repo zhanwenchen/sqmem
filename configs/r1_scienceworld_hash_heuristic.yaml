@@ -1,21 +1,19 @@
-# r3 — Full system (sentence-transformers + local LLM + tuned lambda)
+# r1 — Pipeline validation
 #
-# What it tests: does memory improve over a real base policy?
-# Only changes from r2: LLM base policy + lambda_memory=3.0.
-# lambda=3.0 so memory can overcome the LLM's 1.0 vs ~0.05 base-score gap
-# (requires Q_other - Q_llm_choice > 0.95/lambda ≈ 0.32).
+# What it tests: does the scaffold produce trustworthy artifacts?
+# - Hash embedder (no external dependencies, deterministic)
+# - Keyword heuristic base policy (no LLM, no cost)
+# - Gold + random memory (contrastive returns: ~15% high, ~75% near-zero)
 #
-# Expected result: for episodes where the LLM picks a low-Q action but a
-# high-Q gold action exists in memory, sq_mem should override and improve.
-# Value-destruction controls (shuffled/reversed returns) should intervene
-# differently, with worse outcomes — this is the key falsification test.
-# H1, H2, H8 are the checks to watch.
+# Expected result: Q-values should spread (mean ~0.15–0.20, std ~0.30)
+# because the hash embedder can distinguish some state-action pairs.
+# Memory will rarely override the heuristic. Success rate = 0 (heuristic
+# can't complete ScienceWorld tasks). H0 and H10 should be "supported";
+# H1–H9 will be "inconclusive" due to zero success — that is correct.
 #
-# Requires: llama-server running on port 8080 (see README).
-#
-# Run: python scripts/run_experiment.py --config configs/r3_st_llm.yaml --output-dir results
+# Run: python scripts/run_experiment.py --config configs/r1_scienceworld_hash_heuristic.yaml --output-dir results
 
-run_id: r3_st_llm
+run_id: r1_scienceworld_hash_heuristic
 
 benchmark:
   name: scienceworld
@@ -23,7 +21,7 @@ benchmark:
     - find-non-living-thing       # easiest task: 5-step gold, score deltas at 4 of 5 steps
   train_variations: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
   test_variations: [225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239]
-  max_steps: 20                   # plenty for a 5-step gold path
+  max_steps: 30                   # plenty for a 5-step gold path
   reward_mode: score_delta
   success_threshold: 0.9
 
@@ -33,22 +31,18 @@ memory_builder:
   heuristic_prob: 0.2
 
 memory:
-  embedder: sentence_transformers
-  st_model: all-MiniLM-L6-v2
+  embedder: hash
+  vocab_size: 4096
+  dim: 64
   top_r: 10
   alpha: 0.5
   beta: 0.1
 
 agent:
-  lambda_memory: 3.0
+  lambda_memory: 1.0
   rho_uncertainty: 0.5
   epsilon: 0.1            # 10% random exploration so trajectories diverge across variants
-  llm:
-    enabled: true
-    provider: local
-    url: http://localhost:8080/v1
-    model: local-model
-    max_candidates: 20
+  # llm.enabled: false (default) — pure heuristic base policy
 
 variants:
   - raw_history

@@ -1,0 +1,66 @@
+# r0b — ALFWorld dense-memory diagnostic
+#
+# The r0 run showed: pipeline clean, memory bank has 25/1175 = 2% success rows,
+# but sq_mem produced 0/150 interventions at test time. Two reasons:
+#
+#   (1) Bank density too low — softmax-weighted Q of retrieved success rows
+#       averages near zero when only 2% of items are non-zero.
+#   (2) λ_memory=3 cannot flip the LLM's argmax — the score gap between the
+#       LLM's first and second choice is ~0.95 (llm_policy.py:222), so memory
+#       needs λ × Δmem_q ≥ 1.0 to overcome it. With Δmem_q ≤ 0.05, λ≥20.
+#
+# This config attacks both: one task with 20 rollouts (denser success rows)
+# and λ=20 (memory has authority when retrieval surfaces real signal).
+#
+# Wall time: ~30 min. If still 0 interventions, the 4B is settled.
+
+run_id: r0b_alfworld_diagnostic
+
+benchmark:
+  name: alfworld
+  data_root: ${ALFWORLD_DATA}
+  train_split: train
+  test_split: valid_unseen
+  n_train: 1
+  n_test: 5
+  max_steps: 50
+  reward_mode: score_delta
+  success_threshold: 0.9
+  task_types:
+    - look_at_obj_in_light  # narrowest task type, ~5-step gold path
+
+memory_builder:
+  agent: self_rollout
+  n_rollouts_per_task: 20  # bumped 5→20 for denser memory bank
+  epsilon: 0.3
+
+memory:
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 20.0   # bumped 3→20: needed to flip LLM argmax when memory signal is real
+  rho_uncertainty: 0.5
+  epsilon: 0.1
+  memory_mode: q_rerank
+  normalize_actions: true
+  llm:
+    enabled: true
+    provider: local
+    url: http://localhost:8080/v1
+    model: local-model
+    max_candidates: 20
+
+variants:
+  - raw_history
+  - sq_mem
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5

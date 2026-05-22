@@ -4,7 +4,7 @@
 
 ## 1. Motivation
 
-Long-horizon interactive agents accumulate a trajectory prefix $\tau_{\leq t}$ as they act. A natural question is: what should be stored in external memory to make future decisions better?
+Long-horizon interactive agents accumulate a trajectory prefix \(\tau_{\leq t}\) as they act. A natural question is: what should be stored in external memory to make future decisions better?
 
 Existing approaches store either raw transcripts (retrieved by similarity) or summaries of the current trajectory. Neither explicitly stores *value evidence* — information about which actions led to high downstream return from states similar to the current one.
 

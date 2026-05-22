@@ -1,0 +1,83 @@
+# r3 — ALFWorld full system (sentence-transformers + local LLM + tuned lambda)
+# Same lambda=3.0 reasoning as r3 on ScienceWorld.
+# Requires llama-server running on port 8080.
+
+run_id: r3_alfworld_st_llm
+
+benchmark:
+  name: alfworld
+  data_root: ${ALFWORLD_DATA}
+  train_split: train
+  test_split: valid_unseen
+  n_train: 15
+  n_test: 15
+  max_steps: 50    # ALFWorld gold paths 10–25 steps; 50 ≈ 2–5× slack
+  reward_mode: score_delta
+  success_threshold: 0.9
+
+memory_builder:
+  agent: self_rollout            # benchmark-agnostic: roll out the SAME LLM base
+                                  # policy on training tasks; returns labels come
+                                  # from observed env rewards. Replaces gold-path
+                                  # memory (which required benchmark-specific
+                                  # text-form gold trajectories).
+  n_rollouts_per_task: 20         # bumped from 3 — with a weak 4B LLM each rollout
+                                  # has ~1% success rate; 300 total rollouts
+                                  # (20 × 15 tasks) should accumulate a handful
+                                  # of successful trajectories to seed the
+                                  # memory bank with real value variance.
+  epsilon: 0.3                    # higher ε than test time so distinct rollouts
+                                  # of the same task produce diverse trajectories
+
+memory:
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 3.0
+  rho_uncertainty: 0.5
+  epsilon: 0.1
+  # Paper-faithful: keep the soft-Q table mechanism. Address the ALFWorld
+  # action-mismatch problem by normalizing action text before retrieval
+  # ("examine shelf 1" and "examine shelf 5" map to the same memory cluster).
+  # Mechanism is unchanged; only the action key generalizes across instances.
+  memory_mode: q_rerank
+  normalize_actions: true
+  # Optional knobs (off by default — flip to study the paper's claim further):
+  # state_value_in_prompt: true   # surface V(s) scalar in the LLM prompt
+  # q_in_prompt: true              # surface per-action Q/σ; LLM is the decider
+  # memory_mode: rag_context        # surface retrieved triples; LLM is the decider
+  llm:
+    enabled: true
+    provider: local
+    url: http://localhost:8080/v1
+    model: local-model
+    max_candidates: 20
+
+variants:
+  - raw_history
+  - summary_memory
+  - semantic_retrieval
+  - state_only_value_memory
+  - raw_prefix_sq_mem
+  - sq_mem
+  - sq_mem_no_returns
+  - sq_mem_no_action_conditioning
+  - sq_mem_no_structured_state
+  - sq_mem_no_uncertainty
+  - sq_mem_top1
+  - sq_mem_uniform_weights
+  - sq_mem_random_memory
+  - sq_mem_shuffled_returns
+  - sq_mem_value_reversed
+  - sq_mem_zero_returns
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5

@@ -1,0 +1,65 @@
+# r0 — ScienceWorld diagnostic (sanity check before the long r3 SW run)
+#
+# Mirrors r0_alfworld_diagnostic.yaml in spirit: a small, fast run that
+# catches LLM-pipeline regressions on the known-good benchmark before
+# committing 5-7 hr to r3 SW. Useful for catching:
+#   - llama-server flag changes that broke inference (e.g. context
+#     truncation, thinking-mode leakage, GPU offload not actually working)
+#   - code regressions in the new memory_mode / normalize_actions /
+#     state_value_in_prompt / q_in_prompt plumbing
+#
+# Same task as r3 SW (find-non-living-thing, 5-step gold path), just smaller
+# n_train/n_test/variants. If raw_history or sq_mem fail here, do NOT proceed
+# to r3 SW — something has regressed.
+#
+# Wall time: ~25-30 min on Qwen3.5-9B with corrected llama-server flags.
+
+run_id: r0_scienceworld_diagnostic
+
+benchmark:
+  name: scienceworld
+  task_names:
+    - find-non-living-thing
+  train_variations: [0, 1, 2, 3, 4]
+  test_variations: [225, 226, 227]
+  max_steps: 30
+  reward_mode: score_delta
+  success_threshold: 0.9
+
+memory_builder:
+  # Same as r3 SW — gold + random is the established SW builder.
+  # (Unlike ALFWorld, ScienceWorld's gold-path source is reliable.)
+  agent: scienceworld_gold_and_random
+  random_episodes_per_task: 3
+  heuristic_prob: 0.2
+
+memory:
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 3.0
+  rho_uncertainty: 0.5
+  epsilon: 0.1
+  llm:
+    enabled: true
+    provider: local
+    url: http://localhost:8080/v1
+    model: local-model
+    max_candidates: 20
+
+variants:
+  # Just baselines + full sq_mem — we don't need the 16-variant ablation
+  # for a sanity check, just "does the mechanism still fire?"
+  - raw_history
+  - sq_mem
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5
