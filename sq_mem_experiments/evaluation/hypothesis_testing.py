@@ -157,6 +157,95 @@ def _paired_comparison(
     )
 
 
+def _paired_reward_bootstrap(
+    run_dir: str,
+    variant_a: str,
+    variant_b: str,
+    n_resamples: int = 2000,
+    seed: int = 42,
+) -> dict[str, float] | None:
+    """Paired bootstrap on per-task `total_reward`: returns (delta, ci_low, ci_high, n_pairs)
+    for (variant_a − variant_b). Returns None if either episode file is missing
+    or the number of shared task_ids is < 5.
+
+    Uses total_reward (richer signal than binary success). On binary-reward
+    benchmarks (ALFWorld) total_reward equals success; on partial-credit
+    benchmarks (ScienceWorld) it tracks gold-path progress.
+    """
+    eps_a = _load_episodes(run_dir, variant_a)
+    eps_b = _load_episodes(run_dir, variant_b)
+    if not eps_a or not eps_b:
+        return None
+    map_a = {e["task_id"]: float(e.get("total_reward", float(e["success"]))) for e in eps_a}
+    map_b = {e["task_id"]: float(e.get("total_reward", float(e["success"]))) for e in eps_b}
+    shared = sorted(set(map_a) & set(map_b))
+    if len(shared) < 5:
+        return None
+    a = np.array([map_a[t] for t in shared], dtype=float)
+    b = np.array([map_b[t] for t in shared], dtype=float)
+    delta = float(a.mean() - b.mean())
+    rng = np.random.RandomState(seed)
+    diffs = np.empty(n_resamples, dtype=float)
+    n = len(shared)
+    for i in range(n_resamples):
+        idx = rng.randint(0, n, size=n)
+        diffs[i] = a[idx].mean() - b[idx].mean()
+    return {
+        "delta":   delta,
+        "ci_low":  float(np.percentile(diffs, 2.5)),
+        "ci_high": float(np.percentile(diffs, 97.5)),
+        "n_pairs": float(n),
+    }
+
+
+def _sq_beats_bootstrap(
+    run_dir: str,
+    controls: list[str],
+    min_delta: float,
+) -> tuple[str, str]:
+    """Bootstrap-CI version of _sq_beats.
+
+    Supported  iff every control's (sq_mem − control) 95% CI lower bound > min_delta.
+    Weakened   iff every control's CI upper bound < 0 (sq_mem is below them).
+    Inconclusive otherwise (some CI crosses 0 — we don't have enough data).
+    """
+    parts: list[str] = []
+    all_strictly_above = True
+    all_strictly_below = True
+    any_tested = False
+
+    for c in controls:
+        result = _paired_reward_bootstrap(run_dir, "sq_mem", c)
+        if result is None:
+            parts.append(f"{c}: not_tested")
+            all_strictly_above = False
+            all_strictly_below = False
+            continue
+        any_tested = True
+        d, lo, hi = result["delta"], result["ci_low"], result["ci_high"]
+        if lo > min_delta:
+            mark = "✓"
+        elif hi < 0:
+            mark = "✗ (sq_mem below)"
+            all_strictly_above = False
+        else:
+            mark = "ambiguous (CI crosses 0)"
+            all_strictly_above = False
+            all_strictly_below = False
+        if hi >= 0:
+            all_strictly_below = False
+        parts.append(f"sq_mem vs {c}: Δ={d:+.3f} CI=[{lo:+.3f}, {hi:+.3f}] {mark}")
+
+    rationale = "; ".join(parts)
+    if not any_tested:
+        return NOT_TESTED, "none of the comparison variants were run"
+    if all_strictly_above:
+        return SUPPORTED, rationale
+    if all_strictly_below:
+        return WEAKENED, rationale
+    return INCONCLUSIVE, rationale
+
+
 def _sq_beats(
     summary: pd.DataFrame,
     others: list[str],
@@ -227,6 +316,16 @@ def _h1_main_comparison(
 def _h2_value_destruction(
     run_dir: str, summary: pd.DataFrame, min_delta: float
 ) -> CheckResult:
+    """H2 prefers paired-bootstrap CIs on per-task reward over point-estimate
+    thresholds, so close calls report 'inconclusive (CI crosses 0)' rather than
+    silently failing the 0.02-threshold rule. With n=15 episodes per variant the
+    point-estimate verdict can flip on a single-episode flicker; the CI version
+    is more honest about that uncertainty.
+
+    Falls back to summary-based point-estimate `_sq_beats` when episode files
+    aren't available (e.g., unit tests with summary-only fixtures, or older
+    result dirs that didn't write episodes_*.jsonl).
+    """
     controls = [
         "sq_mem_shuffled_returns",
         "sq_mem_value_reversed",
@@ -234,7 +333,11 @@ def _h2_value_destruction(
         "sq_mem_no_returns",
         "sq_mem_random_memory",
     ]
-    status, rationale = _sq_beats(summary, controls, min_delta)
+    # Prefer bootstrap if episode files exist for sq_mem; else fall back.
+    if _load_episodes(run_dir, "sq_mem") is not None:
+        status, rationale = _sq_beats_bootstrap(run_dir, controls, min_delta)
+    else:
+        status, rationale = _sq_beats(summary, controls, min_delta)
     # Extra check: reversed should hurt (sq_mem_value_reversed < raw_history)
     extras: list[str] = []
     rev_sr = _sr(summary, "sq_mem_value_reversed")

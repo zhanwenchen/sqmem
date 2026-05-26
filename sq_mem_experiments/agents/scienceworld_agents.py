@@ -55,6 +55,14 @@ class AgentConfig:
     #    let the LLM decide; arithmetic combine (score + λ·Q − ρ·σ) is skipped.
     q_in_prompt: bool = False
 
+    # σ-gate: under q_in_prompt, if the mean σ across candidate annotations
+    # exceeds this threshold, suppress the annotations entirely for that
+    # decision (LLM proceeds without memory hints). Default 1.0 disables
+    # gating (σ is in [0, 1], so threshold ≥ 1.0 always passes through).
+    # Empirically useful values are in [0.3, 0.7] on benchmarks where memory
+    # is informative when confident but misleading when uncertain.
+    q_gate_sigma_threshold: float = 1.0
+
 
 # ---------------------------------------------------------------------------
 # Heuristic base policy helpers
@@ -95,7 +103,17 @@ def heuristic_base_score(action: str, task_goal: str, observation: str) -> float
 # ---------------------------------------------------------------------------
 
 class ScienceWorldBaseAgent(BaseAgent):
-    """Heuristic base policy with no external memory."""
+    """Heuristic base policy with no external memory.
+
+    Despite the name, this class is also the per-rollout agent for ALFWorld's
+    `self_rollout` memory builder. The state_text we store here ends up as
+    the *retrieval key* in memory; test-time queries from ScienceWorldSQMemAgent
+    use `compile_scienceworld(observations, actions, task_goal, score)`. To
+    keep keys matchable, we compile state the same way here — otherwise the
+    embedder compares a query like "Task: look at mug…" to a memory key like
+    "You pick up the plate 1 from the cabinet 2." and matches on kitchen-room
+    objects rather than on the task identity.
+    """
 
     def __init__(
         self,
@@ -110,16 +128,18 @@ class ScienceWorldBaseAgent(BaseAgent):
         self._rng = random.Random()
         self._task_id = ""
         self._task_goal = ""
-        self._last_obs = ""
+        self._observations: list[str] = []
         self._actions: list[str] = []
+        self._score: float = 0.0
         self._decisions: list[Decision] = []
         self._step = 0
 
     def reset(self, task_id: str, task_goal: str) -> None:
         self._task_id = task_id
         self._task_goal = task_goal
-        self._last_obs = ""
+        self._observations = []
         self._actions = []
+        self._score = 0.0
         self._decisions = []
         self._step = 0
         # Seed scheme: per-task by default (so exploration is comparable across
@@ -130,8 +150,11 @@ class ScienceWorldBaseAgent(BaseAgent):
             salt = salt + (self._seed,)
         self._rng = random.Random(hash(salt) & 0xFFFFFFFF)
 
+    def update(self, _reward: float, _done: bool, info: dict[str, Any]) -> None:
+        self._score = float(info.get("score", self._score))
+
     def act(self, observation: str, valid_actions: list[str]) -> str:
-        self._last_obs = observation
+        self._observations.append(observation)
         if not valid_actions:
             return "look around"
         if self._llm_policy:
@@ -155,10 +178,15 @@ class ScienceWorldBaseAgent(BaseAgent):
             )
             for a in valid_actions
         ]
+        # Compile the SAME state representation that ScienceWorldSQMemAgent uses
+        # at test time — task goal at the top, recent obs/actions, current score.
+        state_text = compile_scienceworld(
+            self._observations, self._actions, self._task_goal, self._score
+        )
         d = Decision(
             task_id=self._task_id,
             step_index=self._step,
-            state_text=observation[:500],
+            state_text=state_text,
             observation=observation,
             candidates=candidates,
             base_selected_action=argmax_selected,
@@ -479,24 +507,57 @@ class ScienceWorldSQMemAgent(BaseAgent):
         if self._config.q_in_prompt:
             per_action_q = {a: (mem_qs[a], mem_sigmas[a]) for a in valid_actions}
 
+            # σ-gate (Issue #2): if the LLM-consumed Q values are uniformly
+            # uncertain (high mean σ), skip injecting them for this step.
+            # The LLM falls back to its own reasoning without misleading hints.
+            # Default threshold 1.0 disables gating (σ is in [0,1]).
+            if (per_action_q
+                and self._config.q_gate_sigma_threshold < 1.0
+                and len(per_action_q) > 0):
+                mean_sigma = sum(s for _, s in per_action_q.values()) / len(per_action_q)
+                if mean_sigma > self._config.q_gate_sigma_threshold:
+                    per_action_q = None  # gated off for this decision
+
+        # Memory-informed scoring: LLM sees Q annotations / V prior in prompt
+        # (under q_in_prompt / state_value_in_prompt), or just plain prompt.
         if self._llm_policy:
-            base_scores = self._llm_policy.score_actions(
+            informed_scores = self._llm_policy.score_actions(
                 observation, valid_actions, self._task_goal, self._actions,
                 per_action_q=per_action_q,
                 state_value_prior=v_prior,
             )
         else:
-            base_scores = {a: heuristic_base_score(a, self._task_goal, observation) for a in valid_actions}
+            informed_scores = {a: heuristic_base_score(a, self._task_goal, observation) for a in valid_actions}
+
+        # Counterfactual base policy (Issue #1): when q_in_prompt or
+        # state_value_in_prompt is on, the informed_scores were already
+        # memory-influenced. To measure whether memory changed the LLM's
+        # decision (H8 intervention audit), we need a SECOND LLM call with
+        # no memory hints in the prompt. This doubles LLM cost only for
+        # those modes; the standard linear-combine path skips it.
+        needs_counterfactual = self._llm_policy is not None and (
+            self._config.q_in_prompt or self._config.state_value_in_prompt
+        )
+        if needs_counterfactual:
+            assert self._llm_policy is not None  # narrow for type checker
+            base_scores = self._llm_policy.score_actions(
+                observation, valid_actions, self._task_goal, self._actions,
+                per_action_q=None,
+                state_value_prior=None,
+            )
+        else:
+            base_scores = informed_scores
+
         base_selected = max(base_scores, key=lambda a: base_scores[a])
 
         combined: dict[str, float] = {}
         if self._config.q_in_prompt:
             # LLM saw Q/σ in its prompt — its score IS the combined score.
-            combined = dict(base_scores)
+            combined = dict(informed_scores)
         else:
             for action in valid_actions:
                 combined[action] = (
-                    base_scores[action]
+                    informed_scores[action]
                     + self._config.lambda_memory * mem_qs[action]
                     - self._config.rho_uncertainty * mem_sigmas[action]
                 )
@@ -506,7 +567,7 @@ class ScienceWorldSQMemAgent(BaseAgent):
             selected = self._rng.choice(valid_actions)
         else:
             selected = argmax_selected
-        # memory_changed tracks reranking, not exploration:
+        # memory_changed = the informed choice differs from the no-memory choice
         memory_changed = argmax_selected != base_selected
 
         # Build candidate list for the decision log

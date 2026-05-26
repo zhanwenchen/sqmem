@@ -241,15 +241,24 @@ class ALFWorldAdapter(BaseEnv):
         # else leaves `data_path` unbound. We use OOD here because the
         # gamefile is overridden per-task via self._env.gamefiles = [gamefile]
         # anyway — collect_game_files only needs to find *some* path to walk.
+        # Rewrite the loaded config's dataset paths to point at $ALFWORLD_DATA.
+        # Many publicly-shipped base_config.yaml files use *relative* paths like
+        # `./data/alfworld/json_2.1.1/train`, which resolve relative to the cwd
+        # (whatever directory the script was launched from) and almost never
+        # match the actual data location. We override with absolute paths so
+        # the run is location-independent.
+        data_root = os.environ.get("ALFWORLD_DATA", "")
+        if data_root:
+            data_root = os.path.abspath(os.path.expanduser(data_root))
+            ds = cfg.setdefault("dataset", {})
+            ds["data_path"]          = os.path.join(data_root, "json_2.1.1", "train")
+            ds["eval_id_data_path"]  = os.path.join(data_root, "json_2.1.1", "valid_seen")
+            ds["eval_ood_data_path"] = os.path.join(data_root, "json_2.1.1", "valid_unseen")
+
         if generate_gold_path:
             train_eval_mode = "train"
         else:
             train_eval_mode = "eval_out_of_distribution"
-            # Ensure the OOD/ID dataset paths exist in the loaded config;
-            # fall back to data_path if the config didn't ship with them.
-            ds = cfg.setdefault("dataset", {})
-            ds.setdefault("eval_ood_data_path", ds.get("data_path", ""))
-            ds.setdefault("eval_id_data_path", ds.get("data_path", ""))
         tw_env = AlfredTWEnv(cfg, train_eval=train_eval_mode)
         self._env: Any = tw_env.init_env(batch_size=1)
         self.reward_mode = reward_mode

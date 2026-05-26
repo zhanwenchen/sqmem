@@ -273,8 +273,23 @@ export ALFWORLD_CONFIG=/Users/zhanwenchen/sqmem/config_alfworld.yaml
 To run the experiment
 
 ```bash
+/Users/zhanwenchen/llama.cpp/build/bin/llama-server \
+  -m /Users/zhanwenchen/sqmem/qwen3.5_9b/Qwen3.5-9B-UD-Q4_K_XL.gguf \
+  --port 8080 \
+  --ctx-size 8192 \
+  -ngl 999 \
+  --api-key local \
+  --chat-template-kwargs '{"enable_thinking":false}'
+
 kill $(cat logs/overnight.pid)
 nohup ./scripts/run_overnight.sh > logs/overnight.log 2>&1 &
 echo $! > logs/overnight.pid
 disown
+
+export ALFWORLD_DATA=/Users/zhanwenchen/.cache/alfworld
+uv run python scripts/run_experiment.py \
+  --config configs/r3_alfworld_st_llm.yaml \
+  --run-id-prefix "$(date +%Y%m%d%H%M%S)_" \
+  > logs/r3_alfworld_postfix.log 2>&1
+
 ```

@@ -1,0 +1,76 @@
+# r4 ALFWorld — Flag B: state_value_in_prompt (V(s) scalar prior in LLM prompt)
+#
+# Builds on r3_alfworld_st_llm.yaml. Identical except state_value_in_prompt: true.
+# When state_value_in_prompt is true, the runner:
+#   - computes V(s) via state-only soft aggregation (no action conditioning)
+#   - injects "Memory prior: similar past states reached avg outcome X.XX" into the prompt
+#   - per-action Q-rerank still happens via the standard arithmetic combine
+#
+# Hypothesis being tested: a single scalar V(s) summary may be more
+# actionable on ALFWorld than per-action Q values. The LLM gets a hint
+# about whether the current state "looks like a winning state" overall,
+# without committing to a specific action recipe that may not transfer.
+
+run_id: r4_alfworld_v_in_prompt
+
+benchmark:
+  name: alfworld
+  data_root: ${ALFWORLD_DATA}
+  train_split: train
+  test_split: valid_unseen
+  n_train: 15
+  n_test: 15
+  max_steps: 50
+  reward_mode: score_delta
+  success_threshold: 0.9
+
+memory_builder:
+  agent: self_rollout
+  n_rollouts_per_task: 20
+  epsilon: 0.3
+
+memory:
+  embedder: sentence_transformers
+  st_model: all-MiniLM-L6-v2
+  top_r: 10
+  alpha: 0.5
+  beta: 0.1
+
+agent:
+  lambda_memory: 3.0
+  rho_uncertainty: 0.5
+  epsilon: 0.1
+  memory_mode: q_rerank
+  normalize_actions: true
+  state_value_in_prompt: true     # ← Flag B
+  llm:
+    enabled: true
+    provider: local
+    url: http://localhost:8080/v1
+    model: local-model
+    max_candidates: 20
+
+variants:
+  - raw_history
+  - summary_memory
+  - semantic_retrieval
+  - state_only_value_memory
+  - raw_prefix_sq_mem
+  - sq_mem
+  - sq_mem_no_returns
+  - sq_mem_no_action_conditioning
+  - sq_mem_no_structured_state
+  - sq_mem_no_uncertainty
+  - sq_mem_top1
+  - sq_mem_uniform_weights
+  - sq_mem_random_memory
+  - sq_mem_shuffled_returns
+  - sq_mem_value_reversed
+  - sq_mem_zero_returns
+
+hypothesis_tests:
+  min_success_delta: 0.02
+  min_calibration_spearman: 0.30
+  min_intervention_episode_rate: 0.01
+  bootstrap_samples: 1000
+  min_bootstrap_pairs: 5

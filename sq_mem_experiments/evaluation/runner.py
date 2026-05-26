@@ -421,6 +421,7 @@ class ExperimentRunner:
             normalize_actions=bool(agent_cfg.get("normalize_actions", False)),
             state_value_in_prompt=bool(agent_cfg.get("state_value_in_prompt", False)),
             q_in_prompt=bool(agent_cfg.get("q_in_prompt", False)),
+            q_gate_sigma_threshold=float(agent_cfg.get("q_gate_sigma_threshold", 1.0)),
         )
         if base_agent_config.memory_mode not in ("q_rerank", "rag_context"):
             raise ValueError(
